@@ -1,0 +1,7 @@
+data/
+results/
+results_test/
+figs/
+
+*.log
+*.h5ad

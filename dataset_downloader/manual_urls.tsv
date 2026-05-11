@@ -1,0 +1,5 @@
+cat > manual_urls.tsv <<'EOF'
+cd4_treg_dnt	https://allenimmunology.org/public/publication/download/84792154-cdfb-42d0-8e42-39e210e980b4/filesets/568ad40c-516a-4646-9426-bdcd7029c1f5/human_immune_health_atlas_cd4t-treg-dnt.h5ad
+cd8_gdt_mait	https://allenimmunology.org/public/publication/download/84792154-cdfb-42d0-8e42-39e210e980b4/filesets/568ad40c-516a-4646-9426-bdcd7029c1f5/human_immune_health_atlas_cd8t-gdt-mait.h5ad
+b_plasma	https://allenimmunology.org/public/publication/download/84792154-cdfb-42d0-8e42-39e210e980b4/filesets/568ad40c-516a-4646-9426-bdcd7029c1f5/human_immune_health_atlas_b-plasma.h5ad
+EOF

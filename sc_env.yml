@@ -1,0 +1,26 @@
+name: sc_fate_env
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  # --- 数据兼容核心层 (严格锁死以支持接力) ---
+  - numpy<2.0
+  - pandas<2.0.0
+  - anndata>=0.8.0,<0.10.0  # 0.9.x 是目前最兼容的版本区间
+  - h5py>=3.0
+  # --- 基础工具 ---
+  - scanpy>=1.9.3
+  - scvelo>=0.2.5
+  - matplotlib<3.8.0        # CellOracle 绘图兼容性要求
+  - numba<0.60              # 匹配 numpy<2.0
+  # --- CellRank (通过 conda 安装更稳定) ---
+  - cellrank
+  - leidenalg
+  - python-igraph
+  - pip:
+    # --- CellOracle 及其依赖 ---
+    - celloracle
+    - scikit-learn<1.3.0    # 避免 CellOracle 某些模型接口变动
