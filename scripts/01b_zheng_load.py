@@ -9,6 +9,7 @@
 """
 import scanpy as sc, anndata as ad, pandas as pd, numpy as np
 from pathlib import Path
+import h5py
 
 DATA = Path("data"); RES = Path("results")
 (RES/"subsets").mkdir(parents=True, exist_ok=True)
@@ -16,6 +17,13 @@ DATA = Path("data"); RES = Path("results")
 # ============ 1. 加载 Zheng CD4 + CD8 ============
 adatas = {}
 for which in ["CD4", "CD8"]:
+    try:
+        with h5py.File(file_path, 'r+') as f:
+            if 'uns' in f and 'log1p' in f['uns']:
+                del f['uns']['log1p']
+                print(f"  [MAGIC] Removed incompatible 'uns/log1p' from {which}")
+    except Exception as e:
+        pass
     a = sc.read_h5ad(DATA/"zheng2021"/f"{which}.h5ad")
     print(f"\n=== Zheng {which}: {a.shape} ===")
     print(f"  meta.cluster levels: {a.obs['meta.cluster'].nunique()}")

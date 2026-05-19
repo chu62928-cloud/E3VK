@@ -1,129 +1,145 @@
+#!/usr/bin/env python
 """
-04_aggregate_dr.py
-========================================================
-功能: 
-  1. 扫描 results/AIHA/knk/ 下所有亚群的虚拟敲除结果 (DR_*.csv)
-  2. 自动兼容/标准化列名 (统一为 gene, score, Z, p_adj, ko, subset)
-  3. 合并为 long-format 极速 Parquet 大表
-  4. 统计每个亚群中每个 E3 敲除后的显著 (p_adj < 0.05) 靶基因数量，生成脆弱性矩阵 (Vulnerability Matrix)
-"""
+04_aggregate_dr.py — 汇总所有 scTenifoldKnk DR 结果
 
-import pandas as pd
-import re
+输入: results/AIHA/knk/<subset>/DR_<E3>.csv
+输出:
+  - results/AIHA/downstream/dr_long.parquet
+        长表，列: subset, ko, gene, score, FC, T, Z, p_value, p_adj
+        ~ N_subset × N_E3 × N_gene_per_KO 行，~ 千万级
+  - results/AIHA/downstream/dr_zmat_<subset>.parquet
+        每个亚群一份 gene × E3 的 Z 值矩阵，加载快，给 06/07 用
+  - results/AIHA/downstream/dr_padj_<subset>.parquet
+        同上但是 p_adj 矩阵
+
+设计要点:
+  - 只读取以 <subset>_knk.pkl 标记完成的亚群（与 README 一致）
+  - 增量友好: 已存在的 dr_zmat_<subset>.parquet 默认跳过（除非 --force）
+  - 用 float32 + zstd 压缩，能省一半空间
+"""
+from __future__ import annotations
+import argparse
+import sys
 from pathlib import Path
 
-# 1. 统一根路径
-RES = Path("results/AIHA")
-KNK = RES / "knk"
-rows = []
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
 
-def normalize_dr_columns(df):
+sys.path.insert(0, str(Path(__file__).parent))
+from _config import (
+    KNK_DIR, DOWNSTREAM_DIR, list_completed_subsets,
+    DR_COL_GENE, DR_COL_SCORE, DR_COL_FC, DR_COL_T, DR_COL_Z,
+    DR_COL_P, DR_COL_PADJ, DR_COL_KO,
+)
+
+
+REQUIRED_COLS = [DR_COL_GENE, DR_COL_Z, DR_COL_PADJ]
+NUMERIC_COLS  = [DR_COL_SCORE, DR_COL_FC, DR_COL_T, DR_COL_Z, DR_COL_P, DR_COL_PADJ]
+
+
+def load_one_dr(csv_path: Path) -> pd.DataFrame | None:
+    """Load a single DR_<E3>.csv, return None if malformed."""
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as e:
+        print(f"  [skip] {csv_path.name}: {e}", file=sys.stderr)
+        return None
+    if not all(c in df.columns for c in REQUIRED_COLS):
+        print(f"  [skip] {csv_path.name}: missing required cols", file=sys.stderr)
+        return None
+    # ko 列从文件名兜底（不依赖 CSV 内部的 ko 列，因为某些版本可能缺失）
+    ko = csv_path.stem.removeprefix("DR_")
+    if DR_COL_KO not in df.columns:
+        df[DR_COL_KO] = ko
+    for col in NUMERIC_COLS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("float32")
+    df[DR_COL_GENE] = df[DR_COL_GENE].astype(str)
+    df[DR_COL_KO]   = df[DR_COL_KO].astype(str)
+    return df
+
+
+def aggregate_subset(subset: str, force: bool = False) -> pd.DataFrame:
     """
-    针对性升级版：
-    1. 优先检测并保留带下划线（精确计算版）的 'p_value' 和 'p_adj'。
-    2. 如果存在精确版，则主动丢弃带连字符/空格的旧版 'p-value' / 'adjusted p-value'，防止去重时劣币驱逐良币。
-    3. 自动将 boxcox 距离映射为 score。
+    Load all DR_*.csv under one subset directory, return concatenated long-format df.
+    Also writes dr_zmat_<subset>.parquet and dr_padj_<subset>.parquet.
     """
-    # 强制复制一份，避免 DataFrame 切片警告
-    df = df.copy()
-    
-    # 【核心防御机制】：如果新旧两套列同时存在，直接物理超度带连字符的旧列
-    cols_to_drop = []
-    if "p_value" in df.columns and "p-value" in df.columns:
-        cols_to_drop.append("p-value")
-    if "p_adj" in df.columns and "adjusted p-value" in df.columns:
-        cols_to_drop.append("adjusted p-value")
-        
-    if cols_to_drop:
-        df = df.drop(columns=cols_to_drop)
-        
-    # 建立标准的列名映射
-    rename_map = {}
-    for c in df.columns:
-        # 清理空格、点、连字符，统一转为下划线
-        cl = c.lower().strip().replace(".", "_").replace(" ", "_").replace("-", "_")
-        
-        if cl in ("p_value", "pvalue", "p_val"): 
-            rename_map[c] = "p_value"
-        elif cl in ("p_adj", "padj", "fdr", "adjusted_p_value", "adjusted_pvalue"): 
-            rename_map[c] = "p_adj"
-        elif cl in ("gene", "gene_name"): 
-            rename_map[c] = "gene"
-        elif cl in ("distance", "score", "boxcox_transformed_distance"): 
-            # 统一将 boxcox 变换后的距离作为最终的 score
-            rename_map[c] = "score"
-        elif cl in ("z", "z_score"):
-            rename_map[c] = "Z"
-        elif cl in ("fc", "fold_change"):
-            rename_map[c] = "FC"
-            
-    # 重命名
-    df = df.rename(columns=rename_map)
-    
-    # 再次兜底去重：万一还有同名列，保留后出现的（因为精确版通常在右侧/后面）
-    df = df.loc[:, ~df.columns.duplicated(keep='last')].copy()
-    
-    # 补齐可能缺失的核心列，确保输出格式绝对规整
-    import numpy as np
-    for col in ["gene", "score", "Z", "FC", "p_value", "p_adj"]:
-        if col not in df.columns:
-            df[col] = np.nan
-            
-    # 只返回最核心的 6 列，扔掉其他所有杂质
-    return df[["gene", "score", "Z", "FC", "p_value", "p_adj"]]
+    sub_dir = KNK_DIR / subset
+    csvs = sorted(sub_dir.glob("DR_*.csv"))
+    if not csvs:
+        print(f"[{subset}] no DR_*.csv found")
+        return pd.DataFrame()
 
-# 确保输入目录存在
-if not KNK.exists():
-    raise FileNotFoundError(f"[ERROR] 找不到 KNK 结果目录: {KNK}，请确认 03 脚本已成功运行并生成了数据。")
+    zmat_path    = DOWNSTREAM_DIR / f"dr_zmat_{subset}.parquet"
+    padj_path    = DOWNSTREAM_DIR / f"dr_padj_{subset}.parquet"
+    long_chunks  = []
+    z_cols       = {}
+    padj_cols    = {}
 
-print(">>> 正在扫描并合并所有 DR_*.csv 文件...")
-csv_files = list(KNK.rglob("DR_*.csv"))
-print(f"    共检索到 {len(csv_files)} 个结果文件。")
+    for csv in tqdm(csvs, desc=f"[{subset}]", leave=False):
+        df = load_one_dr(csv)
+        if df is None:
+            continue
+        df["subset"] = subset
+        long_chunks.append(df)
+        ko = csv.stem.removeprefix("DR_")
+        z_cols[ko]    = df.set_index(DR_COL_GENE)[DR_COL_Z]
+        padj_cols[ko] = df.set_index(DR_COL_GENE)[DR_COL_PADJ]
 
-for csv in csv_files:
-    # 自动获取父文件夹名作为亚群名称 (例如 CD4_Th1, CD8_exhausted)
-    subset = csv.parent.name
-    
-    # 提取被敲除的 E3 基因名
-    match = re.match(r"DR_(.+)\.csv", csv.name)
-    if not match:
-        continue
-    ko_gene = match.group(1)
-    
-    # 读取并标准化列名
-    df = pd.read_csv(csv)
-    df = normalize_dr_columns(df)
-    
-    # 验证关键列，防止空文件或损坏文件混入
-    if "p_adj" not in df.columns:
-        print(f"    [WARN] 文件 {csv.name} 缺少 p_adj 列，已跳过。")
-        continue
-        
-    # 注入元数据列
-    df = df.assign(subset=subset, ko=ko_gene)
-    rows.append(df)
+    if not long_chunks:
+        return pd.DataFrame()
 
-if not rows:
-    print("[ERROR] 未能合并任何有效的 DR 数据！请检查 KNK 文件夹下的文件内容。")
-    exit(1)
+    long = pd.concat(long_chunks, ignore_index=True)
+    print(f"[{subset}] {len(csvs)} KOs × ~{long[DR_COL_GENE].nunique():,} genes = {len(long):,} rows")
 
-# 合并大表并保存
-all_dr = pd.concat(rows, ignore_index=True)
-parquet_path = RES / "dr_matrix.parquet"
-all_dr.to_parquet(parquet_path)
-print(f"✓ 成功生成 long-format 大表: {parquet_path} (共 {len(all_dr)} 行)")
+    # gene × E3 Z 矩阵
+    zmat = pd.DataFrame(z_cols).astype("float32")
+    padj = pd.DataFrame(padj_cols).astype("float32")
+    # 排序列名让矩阵稳定
+    zmat = zmat.reindex(columns=sorted(zmat.columns))
+    padj = padj.reindex(columns=sorted(padj.columns))
+    zmat.to_parquet(zmat_path, compression="zstd")
+    padj.to_parquet(padj_path, compression="zstd")
+    print(f"        wrote {zmat_path.name} {zmat.shape} and {padj_path.name}")
+    return long
 
-# 2. 计算 Vulnerability Matrix (脆弱性矩阵)
-# 筛选显著差异基因 (FDR < 0.05)
-sig = all_dr[all_dr["p_adj"] < 0.05]
 
-if sig.empty:
-    print("[WARN] 未能在所有结果中找到任何 p_adj < 0.05 的显著基因！将生成空的脆弱性矩阵。")
-    vuln = pd.DataFrame()
-else:
-    # 聚合计数：计算每个亚群下，敲除每个 E3 影响了多少个下游基因
-    vuln = sig.groupby(["subset", "ko"]).size().unstack(fill_value=0)
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--force", action="store_true",
+                    help="overwrite existing per-subset parquet")
+    ap.add_argument("--subsets", nargs="+", default=None,
+                    help="restrict to these subsets (default: all completed)")
+    args = ap.parse_args()
+    print(f"DEBUG: KNK_DIR 实际指向的路径是 -> {KNK_DIR}")
+    print(f"DEBUG: 该路径是否存在 -> {KNK_DIR.exists()}")
+    subsets = args.subsets or list_completed_subsets()
+    if not subsets:
+        print("No completed subsets found. Check that <subset>_knk.pkl exists.")
+        sys.exit(1)
+    print(f"Found {len(subsets)} completed subsets: {subsets}")
 
-vuln_path = RES / "vulnerability.csv"
-vuln.to_csv(vuln_path)
-print(f"✓ 成功生成脆弱性矩阵: {vuln_path} (尺寸: {vuln.shape[0]} subsets x {vuln.shape[1]} E3s)")
+    all_long = []
+    for s in subsets:
+        zmat_path = DOWNSTREAM_DIR / f"dr_zmat_{s}.parquet"
+        if zmat_path.exists() and not args.force:
+            # 若需要 long 表，仍要 load 一次；但跳过 zmat 重写
+            pass
+        long = aggregate_subset(s, force=args.force)
+        if not long.empty:
+            all_long.append(long)
+
+    if not all_long:
+        print("Nothing aggregated.")
+        sys.exit(1)
+
+    long = pd.concat(all_long, ignore_index=True)
+    out = DOWNSTREAM_DIR / "dr_long.parquet"
+    long.to_parquet(out, compression="zstd")
+    print(f"\nWrote {out} ({len(long):,} rows, {long['subset'].nunique()} subsets, "
+          f"{long[DR_COL_KO].nunique()} unique E3 KOs)")
+
+
+if __name__ == "__main__":
+    main()

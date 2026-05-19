@@ -1,31 +1,35 @@
-import scanpy as sc
-import numpy as np
-
-# 读任意一个已经拆好的亚群
-a = sc.read_h5ad("/root/autodl-tmp/E3VK/results_test/subsets/CD4_test.h5ad")
-
-print("=== 基本维度 ===")
-print(f"细胞数: {a.n_obs}")
-print(f"基因数: {a.n_vars}")
-
-print("\n=== X 矩阵实际情况 ===")
-X = a.X
-if hasattr(X, "toarray"):
-    X = X.toarray()
-print(f"X shape: {X.shape}")
-print(f"X 是否稀疏: {hasattr(a.X, 'toarray')}")
-print(f"X 值域: [{X.min():.1f}, {X.max():.1f}]")
-print(f"X 是否整数: {np.allclose(X[:50,:50], X[:50,:50].astype(int))}")
-
-print("\n=== 表达基因过滤后剩多少 ===")
 import pandas as pd
-df = pd.DataFrame(X.T, index=a.var_names, columns=a.obs_names)
+import gzip
+from pathlib import Path
 
-expr_pct = (df > 0).sum(axis=1) / df.shape[1]
-for thr in [0.01, 0.05, 0.10]:
-    n = (expr_pct >= thr).sum()
-    print(f"  表达 >= {thr*100:.0f}% 细胞的基因: {n}")
+# 路径设置
+expr_file = "/root/autodl-tmp/E3VK/data/zheng2021/data/expression/CD4/integration/CD4.expr.txt.gz"
+meta_file = "/root/autodl-tmp/E3VK/data/zheng2021/data/metaInfo/CD4.miniInfo.txt.gz"
 
-print("\n=== var_names 格式 ===")
-print(f"前 5 个基因名: {a.var_names[:5].tolist()}")
-print(f"var 列: {a.var.columns.tolist()}")
+print("🔍 正在检查 CD4 相关文件大小...")
+
+# 1. 检查 miniInfo 里的细胞量
+meta_df = pd.read_csv(meta_file, sep='\t', index_col=0)
+print(f"👉 [注释文件] CD4.miniInfo.txt.gz 包含细胞数: {len(meta_df)}")
+
+# 2. 极速统计表达矩阵的行数 (细胞数)
+def count_cells_in_expr(filepath):
+    count = 0
+    with gzip.open(filepath, 'rt') as f:
+        for _ in f:
+            count += 1
+    # 减去 1 行表头（基因名）
+    return count - 1
+
+expr_cells = count_cells_in_expr(expr_file)
+print(f"👉 [表达矩阵] CD4.expr.txt.gz 包含细胞数: {expr_cells}")
+
+# 3. 诊断结论
+if expr_cells == len(meta_df):
+    print("\n⚠️ 诊断结论：表达矩阵和注释文件一样大。")
+    print("这说明 integration 文件夹里的这个 .expr.txt.gz 本身就是一个被作者下采样过的精简版矩阵！")
+elif expr_cells > len(meta_df):
+    print("\n⚠️ 诊断结论：表达矩阵很大，但是 miniInfo 注释文件太小了！")
+    print("这说明我们漏掉了大量的注释，需要去提取那个完整的 .rds 注释文件。")
+else:
+    print("\n⚠️ 诊断结论：数据维度异常，需进一步排查。")
