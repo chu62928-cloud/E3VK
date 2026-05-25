@@ -6,6 +6,8 @@ _config.py — 下游分析共享配置
 from __future__ import annotations
 from pathlib import Path
 import os
+import pickle
+import sys
 import pandas as pd
 
 # ---------------------------------------------------------------------------
@@ -109,6 +111,24 @@ def list_completed_subsets() -> list[str]:
         if d.is_dir() and (d / f"{d.name}_knk.pkl").exists():
             out.append(d.name)
     return out
+
+def load_wt(subset: str) -> "pd.DataFrame | None":
+    """Load WT scGRN adjacency matrix from Wd.parquet or <subset>_knk.pkl."""
+    wd = KNK_DIR / subset / "Wd.parquet"
+    if wd.exists():
+        return pd.read_parquet(wd)
+    pkl = KNK_DIR / subset / f"{subset}_knk.pkl"
+    if pkl.exists():
+        try:
+            with open(pkl, "rb") as f:
+                obj = pickle.load(f)
+            td = getattr(obj, "tensor_dict", None) or getattr(obj, "_tensor_dict", None)
+            if td and "WT" in td and isinstance(td["WT"], pd.DataFrame):
+                return td["WT"]
+        except Exception as e:
+            print(f"  [{subset}] pkl load failed: {e}", file=sys.stderr)
+    return None
+
 
 def load_e3_family() -> pd.DataFrame:
     """读 E3-ome.xlsx, 输出 Gene -> family 映射。"""

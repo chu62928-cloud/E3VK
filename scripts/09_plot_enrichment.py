@@ -2,6 +2,10 @@
 """
 09_plot_enrichment.py — 基于 NES 方差的特异性可视化 (Publication Quality)
 特点：抛弃单纯的差异基因数量，改用通路 NES 的方差 (极化程度) 来挑选最具特异性生物学意义的 E3 KOs。
+
+DEPRECATED: NES variance KO selection logic has been merged into viz_enrichment.py.
+Use `viz_enrichment.py --ko-select nes_var` instead.
+This script is kept as a reference/backup only.
 """
 from __future__ import annotations
 import argparse

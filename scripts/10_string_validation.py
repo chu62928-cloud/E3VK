@@ -74,7 +74,17 @@ def main():
     ap.add_argument("--sleep", type=float, default=1.0,
                     help="STRING 限速保护: 每次 API 调用间隔秒")
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--tier1", default=None, metavar="CSV",
+                    help="Tier1 master table CSV with subset,ko columns; overrides --top-per-subset")
     args = ap.parse_args()
+    # Tier1 filter: (subset, ko) pairs if --tier1 provided
+    tier1_pairs: set = set()
+    if args.tier1:
+        import pandas as _pd
+        _t = _pd.read_csv(args.tier1)
+        tier1_pairs = set(zip(_t["subset"], _t["ko"]))
+        print(f"[10_string_validation.py] Tier1 filter: {len(tier1_pairs)} (subset, ko) pairs")
+
 
     vuln = pd.read_csv(DOWNSTREAM_DIR / "vulnerability.csv")
     subsets = args.subsets or sorted(vuln["subset"].unique())
@@ -91,7 +101,9 @@ def main():
 
         sub_vuln = vuln[vuln["subset"] == subset].sort_values("n_sig_05", ascending=False)
         sub_vuln = sub_vuln[sub_vuln["n_sig_05"] >= args.min_sig]
-        if not args.all and args.top_per_subset > 0:
+        if tier1_pairs:
+            sub_vuln = sub_vuln[sub_vuln["ko"].apply(lambda k: (subset, k) in tier1_pairs)]
+        elif not args.all and args.top_per_subset > 0:
             sub_vuln = sub_vuln.head(args.top_per_subset)
         if sub_vuln.empty:
             continue

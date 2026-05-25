@@ -130,7 +130,17 @@ def main():
     ap.add_argument("--fdr", type=float, default=FDR_STRICT)
     ap.add_argument("--subsets", nargs="+", default=None)
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--tier1", default=None, metavar="CSV",
+                    help="Tier1 master table CSV with subset,ko columns; overrides --top-per-subset")
     args = ap.parse_args()
+    # Tier1 filter: (subset, ko) pairs if --tier1 provided
+    tier1_pairs: set = set()
+    if args.tier1:
+        import pandas as _pd
+        _t = _pd.read_csv(args.tier1)
+        tier1_pairs = set(zip(_t["subset"], _t["ko"]))
+        print(f"[13_dr_vs_edge.py] Tier1 filter: {len(tier1_pairs)} (subset, ko) pairs")
+
 
     vuln = pd.read_csv(DOWNSTREAM_DIR / "vulnerability.csv")
     subsets = args.subsets or sorted(vuln["subset"].unique())
@@ -152,7 +162,10 @@ def main():
         padj = pd.read_parquet(DOWNSTREAM_DIR / f"dr_padj_{subset}.parquet")
 
         sub_vuln = vuln[vuln["subset"] == subset].sort_values("n_sig_05", ascending=False)
-        sub_vuln = sub_vuln.head(args.top_per_subset)
+        if tier1_pairs:
+            sub_vuln = sub_vuln[sub_vuln["ko"].apply(lambda k: (subset, k) in tier1_pairs)]
+        else:
+            sub_vuln = sub_vuln.head(args.top_per_subset)
 
         outdir = DRE_DIR / subset
         outdir.mkdir(parents=True, exist_ok=True)
