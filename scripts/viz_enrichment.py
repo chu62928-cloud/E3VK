@@ -576,6 +576,46 @@ def plot_tf_heatmap_v2(tf_sum: pd.DataFrame, vuln: pd.DataFrame,
 # ─────────────────────────────────────────────────────────────────────────────
 # 主程序
 # ─────────────────────────────────────────────────────────────────────────────
+def _nes_variance_score(gsea_csv: "Path") -> float:
+    """NES variance across significant terms (from 09_plot_enrichment strategy)."""
+    try:
+        import pandas as _pd
+        df = _pd.read_csv(gsea_csv)
+        if df.empty or "FDR q-val" not in df.columns:
+            return 0.0
+        col_fdr = "FDR q-val" if "FDR q-val" in df.columns else "NOM p-val"
+        df_sig = df[df[col_fdr] < 0.25].copy()
+        if len(df_sig) < 3:
+            return 0.0
+        if "NES" not in df_sig.columns:
+            return 0.0
+        return float(df_sig["NES"].var())
+    except Exception:
+        return 0.0
+
+
+def get_subset_specific_e3_nes_var(
+    enrich_dir: "Path", vuln: "pd.DataFrame", top_n: int = 12
+) -> "dict[str, list[str]]":
+    """Select top E3 per subset by NES variance (polarized pathways, from 09 strategy)."""
+    import pandas as _pd
+    result: dict = {}
+    for subset in sorted(vuln["subset"].unique()):
+        sub_dir = enrich_dir / subset
+        if not sub_dir.exists():
+            continue
+        scores = {}
+        for f in sub_dir.glob("*_gsea.csv"):
+            ko = f.stem.replace("_gsea", "")
+            scores[ko] = _nes_variance_score(f)
+        if not scores:
+            result[subset] = []
+            continue
+        ranked = sorted(scores, key=scores.get, reverse=True)[:top_n]
+        result[subset] = ranked
+    return result
+
+
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root",      default=".", help="E3VK 项目根目录")
@@ -584,6 +624,11 @@ def parse_args():
     ap.add_argument("--fdr-tf",    type=float, default=0.3)
     ap.add_argument("--top-terms", type=int,   default=25)
     ap.add_argument("--top-e3",    type=int,   default=12)
+    ap.add_argument("--ko-select", choices=["subset_zscore", "nes_var"],
+                    default="subset_zscore",
+                    help="Strategy for selecting top E3 KOs: "
+                         "subset_zscore (default, cross-subset z-score) or "
+                         "nes_var (NES variance from 09_plot_enrichment approach)")
     return ap.parse_args()
 
 
@@ -627,8 +672,28 @@ def main():
     print("\n── Fig 1: Pathway × subset heatmap (subset-specific, no housekeeping) ──")
     plot_pathway_heatmap(gsea, out, fdr_cut=args.fdr_gsea, top_n=args.top_terms)
 
-    print("\n── Fig 2: Subset-specific E3 × Pathway bubble (per subset) ──")
-    plot_bubble_v2(gsea, vuln, fam_map, out,
+    print(f"\n── Fig 2: Subset-specific E3 × Pathway bubble (ko_select={args.ko_select}) ──")
+    if args.ko_select == "nes_var" and not vuln.empty:
+        # NES variance strategy (from 09_plot_enrichment): select most polarized KOs
+        nes_var_e3 = get_subset_specific_e3_nes_var(enrich_dir, vuln, top_n=args.top_e3)
+        print(f"  NES-var selected E3: {sum(len(v) for v in nes_var_e3.values())} total")
+        # Inject into bubble plot via vuln override: rerank vuln to put nes_var top E3 first
+        if nes_var_e3:
+            nes_rows = []
+            for subset, kos in nes_var_e3.items():
+                for rank, ko in enumerate(kos):
+                    nes_rows.append({"subset": subset, "ko": ko, "_nes_rank": rank})
+            nes_df = pd.DataFrame(nes_rows)
+            vuln_nes = vuln.merge(nes_df, on=["subset", "ko"], how="left")
+            vuln_nes = vuln_nes.sort_values(["subset", "_nes_rank"]).drop(
+                columns=["_nes_rank"], errors="ignore"
+            )
+            vuln_use = vuln_nes
+        else:
+            vuln_use = vuln
+    else:
+        vuln_use = vuln
+    plot_bubble_v2(gsea, vuln_use, fam_map, out,
                    fdr_cut=args.fdr_gsea,
                    top_terms=args.top_terms,
                    top_e3=args.top_e3)
